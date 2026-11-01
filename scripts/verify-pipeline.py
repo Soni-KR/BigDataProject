@@ -25,6 +25,19 @@ manifest_text = subprocess.check_output([
 manifest = [json.loads(line) for line in manifest_text.splitlines() if line.strip()]
 if not manifest:
     raise RuntimeError("The run manifest is empty")
+source_ports = {}
+port_export = subprocess.Popen(
+    ["hdfs", "dfs", "-cat", args.run_path + "/exports/ports/part-*"],
+    stdout=subprocess.PIPE, universal_newlines=True)
+for line in port_export.stdout:
+    key, count, attacks = line.rstrip("\r\n").split("|")
+    day, port = key.split("#", 1)
+    source_ports.setdefault(day, []).append({
+        "destination_port": int(port), "total_flows": int(count), "attack_flows": int(attacks),
+    })
+if port_export.wait() != 0:
+    raise RuntimeError("Cannot read the Spark port export")
+
 total = 0
 for expected in sorted(manifest, key=lambda row: row["day"]):
     day = expected["day"]
@@ -42,6 +55,15 @@ for expected in sorted(manifest, key=lambda row: row["day"]):
             or ports["attack_flows"] != daily["attack_flows"]
             or ports["total_ports"] != expected["destination_ports"]):
         raise RuntimeError("Port aggregate mismatch: " + day)
+    expected_ports = sorted(source_ports[day], key=lambda row: (-row["total_flows"], row["destination_port"]))
+    if (ports["ports"] != expected_ports[:50]
+            or sum(row["total_flows"] for row in expected_ports) != daily["total_flows"]
+            or sum(row["attack_flows"] for row in expected_ports) != daily["attack_flows"]):
+        raise RuntimeError("Port ranking or totals disagree with Spark: " + day)
+    for limit in (1, 10):
+        limited = get(args.api, "/api/ports?day=" + day + "&limit=" + str(limit))
+        if limited["ports"] != expected_ports[:limit] or limited["total_ports"] != len(expected_ports):
+            raise RuntimeError("Port limit changed the ranking: " + day)
     total += daily["total_flows"]
     print("{}: {} flows, {} attack categories, {} ports".format(
         day, daily["total_flows"], len(attacks["categories"]), ports["total_ports"]))

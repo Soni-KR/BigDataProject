@@ -42,17 +42,28 @@ try {
     count("*").as("total_flows"),
     sum(when(col("label") =!= "BENIGN", 1).otherwise(0)).as("attack_flows")).cache()
 
+  val rankedPorts = ports.withColumn("rank",
+    row_number().over(org.apache.spark.sql.expressions.Window.partitionBy("day")
+      .orderBy(col("total_flows").desc, col("destination_port").asc)))
+    .filter(col("rank") <= 50).groupBy("day")
+    .agg(collect_list(struct(col("destination_port"), col("total_flows"), col("attack_flows"))).as("ports"))
+  val portSnapshot = ports.groupBy("day").agg(count("*").as("total_ports"),
+      sum("total_flows").as("total_flows"), sum("attack_flows").as("attack_flows"))
+    .join(rankedPorts, Seq("day"))
+    .select(col("day"), to_json(struct(col("total_ports"), col("total_flows"),
+      col("attack_flows"), col("ports"))).as("port_stats"))
+
   def export(df: DataFrame, name: String): Unit = {
     df.coalesce(1).write.parquet(s"hdfs://$runPath/aggregates/$name")
   }
   def tsv(df: DataFrame, name: String): Unit = {
-    df.coalesce(1).write.option("sep", "|").option("header", "false")
+    df.coalesce(1).write.option("sep", "|").option("quote", "\u0000").option("header", "false")
       .csv(s"hdfs://$runPath/exports/$name")
   }
   export(daily, "daily")
   export(attacks, "attacks")
   export(ports, "ports")
-  tsv(daily.select(col("day"), col("total_flows"), col("benign_flows"), col("attack_flows")), "daily")
+  tsv(daily.join(portSnapshot, Seq("day")).select(col("day"), col("total_flows"), col("benign_flows"), col("attack_flows"), col("port_stats")), "daily")
   tsv(attacks.select(concat(col("day"), lit("#"), col("attack_type")).as("key"), col("flow_count")), "attacks")
   tsv(ports.select(concat(col("day"), lit("#"), format_string("%05d", col("destination_port"))).as("key"),
     col("total_flows"), col("attack_flows")), "ports")

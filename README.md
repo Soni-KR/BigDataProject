@@ -20,11 +20,10 @@ docker exec hadoop-master bash /tmp/ingest_hdfs.sh
 .\start-dashboard.ps1
 ```
 
-The pipeline starts HBase REST on port 8090 if needed and processes every raw CSV
-on YARN using Spark 2.2 client mode. It writes a new HDFS run under
-`/cyberflow/runs/` and upserts the three derived
-HBase tables. Existing HDFS outputs and raw data are preserved. Imports do not
-delete obsolete rows; use the verification command below after changing inputs.
+The pipeline starts HBase REST on port 8090 if needed. Spark 2.2 (client mode)
+and HBase imports run on YARN. Each run writes HDFS outputs under
+`/cyberflow/runs/` and upserts derived HBase tables. Existing outputs and raw data
+are preserved. Imports do not delete obsolete rows; verify after changing inputs.
 
 Open [the dashboard](http://localhost:3000) or [API docs](http://localhost:8000/docs).
 
@@ -36,10 +35,10 @@ Open [the dashboard](http://localhost:3000) or [API docs](http://localhost:8000/
 - `GET /health` and `GET /health/ready`
 
 Select a capture day to update the charts. CSV export contains daily summaries.
-The API reads the existing `cyber_daily`, `cyber_attacks`, and `cyber_ports`
-tables and rejects aggregate totals that disagree with the daily summary.
+Port rankings use a precomputed top-50 snapshot in `cyber_daily`; requests do not
+scan the detailed port table. Run the pipeline after upgrading to populate it.
 
-To repeat an import from a completed run:
+To repeat an import from a completed current-version run:
 
 ```powershell
 .\run-pipeline.ps1 -ImportOnly -RunPath /cyberflow/runs/RUN_ID

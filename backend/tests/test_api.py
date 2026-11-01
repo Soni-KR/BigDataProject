@@ -1,4 +1,5 @@
 import base64
+import json
 from copy import deepcopy
 
 import httpx
@@ -162,16 +163,69 @@ def test_missing_aggregate_table_is_not_reported_as_zero_attacks():
         assert client.get("/api/attacks?day=2017-07-07").status_code == 502
 
 
+PORT_SNAPSHOT = {
+    "total_ports": 2, "total_flows": 10, "attack_flows": 4,
+    "ports": [
+        {"destination_port": 443, "total_flows": 4, "attack_flows": 3},
+        {"destination_port": 80, "total_flows": 6, "attack_flows": 1},
+    ],
+}
+
+
+def port_client(snapshot, summary=SMALL_DAY, calls=None):
+    def handler(request):
+        if calls is not None:
+            calls.append(request.url.path)
+        assert request.method == "GET"
+        assert request.url.path == "/cyber_daily/2017-07-07"
+        assert request.url.params["v"] == "1"
+        payload = deepcopy(summary)
+        if snapshot is not None:
+            payload["Row"][0]["Cell"].append({
+                "column": encoded("m:port_stats"), "$": encoded(json.dumps(snapshot)),
+            })
+        return httpx.Response(200, json=payload)
+    return client_for(handler)
+
+
 def test_port_limit_applies_after_totals_are_verified():
-    rows = [aggregate_row("2017-07-07#00443", total_flows=4, attack_flows=3),
-            aggregate_row("2017-07-07#00080", total_flows=6, attack_flows=1)]
-    with statistics_client(rows, table="cyber_ports") as client:
+    calls = []
+    with port_client(PORT_SNAPSHOT, calls=calls) as client:
         response = client.get("/api/ports?day=2017-07-07&limit=1")
     assert response.status_code == 200
     assert response.json() == {
         "day": "2017-07-07", "total_ports": 2, "total_flows": 10, "attack_flows": 4,
         "ports": [{"destination_port": 80, "total_flows": 6, "attack_flows": 1}],
     }
+    assert calls == ["/cyber_daily/2017-07-07"]
+
+
+def test_port_ties_sort_by_port_number():
+    snapshot = deepcopy(PORT_SNAPSHOT)
+    for row in snapshot["ports"]:
+        row.update(total_flows=5, attack_flows=2)
+    with port_client(snapshot) as client:
+        assert client.get("/api/ports?day=2017-07-07&limit=1").json()["ports"][0]["destination_port"] == 80
+
+
+def test_missing_port_snapshot_does_not_fall_back_to_a_scan():
+    calls = []
+    with port_client(None, calls=calls) as client:
+        response = client.get("/api/ports?day=2017-07-07")
+    assert response.status_code == 503
+    assert calls == ["/cyber_daily/2017-07-07"]
+
+
+def test_stored_top_fifty_preserves_full_totals():
+    snapshot = {"total_ports": 51, "total_flows": 51, "attack_flows": 0, "ports": [
+        {"destination_port": port, "total_flows": 1, "attack_flows": 0} for port in range(50)
+    ]}
+    daily = {"Row": [aggregate_row("2017-07-07", total_flows=51, benign_flows=51, attack_flows=0)]}
+    with port_client(snapshot, summary=daily) as client:
+        result = client.get("/api/ports?day=2017-07-07&limit=50").json()
+    assert result["total_ports"] == 51
+    assert result["total_flows"] == 51
+    assert len(result["ports"]) == 50
 
 
 @pytest.mark.parametrize("endpoint", ["attacks", "ports"])
@@ -201,14 +255,27 @@ def test_incomplete_or_corrupt_attack_statistics_fail(rows):
         assert client.get("/api/attacks?day=2017-07-07").status_code == 502
 
 
-@pytest.mark.parametrize("rows", [
-    [], [aggregate_row("2017-07-07#65536", total_flows=10, attack_flows=4)],
-    [aggregate_row("2017-07-07#abcde", total_flows=10, attack_flows=4)],
-    [aggregate_row("2017-07-07#00080", total_flows=10, attack_flows=11)],
-    [aggregate_row("2017-07-07#00080", total_flows=9, attack_flows=4)],
+@pytest.mark.parametrize("snapshot", [
+    {},
+    {**PORT_SNAPSHOT, "total_ports": 1},
+    {**PORT_SNAPSHOT, "total_ports": 65537},
+    {**PORT_SNAPSHOT, "total_flows": 9},
+    {**PORT_SNAPSHOT, "ports": PORT_SNAPSHOT["ports"][:1]},
+    {**PORT_SNAPSHOT, "ports": [PORT_SNAPSHOT["ports"][0]] * 2},
+    {**PORT_SNAPSHOT, "ports": [{"destination_port": 65536, "total_flows": 10, "attack_flows": 4}]},
+    {**PORT_SNAPSHOT, "ports": [{"destination_port": "80", "total_flows": 10, "attack_flows": 4}]},
+    {**PORT_SNAPSHOT, "ports": [{"destination_port": 80, "total_flows": 3, "attack_flows": 4}]},
 ])
-def test_invalid_or_incomplete_port_statistics_fail(rows):
-    with statistics_client(rows, table="cyber_ports") as client:
+def test_invalid_or_incomplete_port_statistics_fail(snapshot):
+    with port_client(snapshot) as client:
+        assert client.get("/api/ports?day=2017-07-07").status_code == 502
+
+
+@pytest.mark.parametrize("raw", ["%%%", encoded("not json"), encoded("null"), encoded("[]")])
+def test_corrupt_port_snapshot_fails(raw):
+    payload = deepcopy(SMALL_DAY)
+    payload["Row"][0]["Cell"].append({"column": encoded("m:port_stats"), "$": raw})
+    with client_for(lambda request: httpx.Response(200, json=payload)) as client:
         assert client.get("/api/ports?day=2017-07-07").status_code == 502
 
 
@@ -233,7 +300,7 @@ def test_hbase_empty_scan_object_is_valid_for_a_benign_day():
     assert response.status_code == 200
     assert response.json()["categories"] == []
 
-@pytest.mark.parametrize("endpoint", ["attacks", "ports"])
+@pytest.mark.parametrize("endpoint", ["attacks"])
 @pytest.mark.parametrize("fault,expected", [
     ("timeout", 504), ("connection", 503), ("http", 502),
     ("json", 502), ("base64", 502), ("wrong_prefix", 502),

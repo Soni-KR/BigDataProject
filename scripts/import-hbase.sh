@@ -14,12 +14,15 @@ done
 
 load_table() {
   hbase org.apache.hadoop.hbase.mapreduce.ImportTsv \
-    -Dmapreduce.framework.name=local \
+    -Dmapreduce.framework.name=yarn \
+    -Dmapreduce.map.speculative=false \
     '-Dimporttsv.separator=|' \
     -Dimporttsv.skip.bad.lines=false \
     "-Dimporttsv.columns=$2" "$1" "$CYBERFLOW_RUN_PATH/exports/$3"
 }
-load_table cyber_daily 'HBASE_ROW_KEY,m:total_flows,m:benign_flows,m:attack_flows' daily
+fields=$(hdfs dfs -cat "$CYBERFLOW_RUN_PATH/exports/daily/part-*" | awk -F'|' 'NR == 1 { print NF }')
+[[ "$fields" == 5 ]] || { echo "Daily export lacks port statistics; run the full pipeline." >&2; exit 1; }
+load_table cyber_daily 'HBASE_ROW_KEY,m:total_flows,m:benign_flows,m:attack_flows,m:port_stats' daily
 load_table cyber_attacks 'HBASE_ROW_KEY,m:flow_count' attacks
 load_table cyber_ports 'HBASE_ROW_KEY,m:total_flows,m:attack_flows' ports
 echo "HBase imports complete."

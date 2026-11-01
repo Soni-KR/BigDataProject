@@ -1,7 +1,7 @@
 """Read-only CyberFlow API backed by the existing HBase REST gateway."""
 
 import base64
-import binascii
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import date
@@ -67,16 +67,16 @@ class AttackStatistics(BaseModel):
 
 
 class PortStatistic(BaseModel):
-    destination_port: int = Field(ge=0, le=65535)
-    total_flows: int = Field(ge=0)
-    attack_flows: int = Field(ge=0)
+    destination_port: int = Field(ge=0, le=65535, strict=True)
+    total_flows: int = Field(ge=0, strict=True)
+    attack_flows: int = Field(ge=0, strict=True)
 
 
 class PortStatistics(BaseModel):
     day: date
-    total_ports: int = Field(ge=0)
-    total_flows: int = Field(ge=0)
-    attack_flows: int = Field(ge=0)
+    total_ports: int = Field(ge=0, le=65536, strict=True)
+    total_flows: int = Field(ge=0, strict=True)
+    attack_flows: int = Field(ge=0, strict=True)
     ports: list[PortStatistic]
 
 
@@ -149,23 +149,24 @@ def create_app(*, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(503, "HBase REST is unavailable") from exc
         return {"status": "ok", "hbase": "reachable"}
 
-    @api.get("/api/summary", response_model=Summary)
-    async def summary(
-        request: Request,
-        day: Annotated[str, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")],
-    ):
+    async def read_daily(request: Request, day: str):
         try:
             date.fromisoformat(day)
         except ValueError as exc:
             raise HTTPException(422, "day must be a valid YYYY-MM-DD date") from exc
         response = await read_hbase(request, f"/cyber_daily/{day}", params={"v": 1})
         try:
-            return decode_summary(response.json(), day)
+            payload = response.json()
+            return decode_summary(payload, day), payload
         except SummaryNotFound as exc:
             raise HTTPException(404, "Summary not found") from exc
-        except (ValueError, TypeError, KeyError, IndexError, AttributeError, binascii.Error) as exc:
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             raise HTTPException(502, "Invalid HBase summary data") from exc
 
+    @api.get("/api/summary", response_model=Summary)
+    async def summary(request: Request, day: Annotated[str, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")]):
+        daily, _ = await read_daily(request, day)
+        return daily
 
     async def statistics(request: Request, table: str, day: str, metrics: set[str]):
         response = await read_hbase(request, f"/{table}/{day}%23*", params={"v": 1, "endrow": day + "$"}, allow_missing=True)
@@ -202,27 +203,32 @@ def create_app(*, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         day: Annotated[str, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")],
         limit: Annotated[int, Query(ge=1, le=50)] = 10,
     ):
-        daily = await summary(request, day)
-        rows = await statistics(request, "cyber_ports", day, {"m:total_flows", "m:attack_flows"})
-        items = []
-        seen = set()
-        for key, values in rows.items():
-            suffix = key[len(day) + 1:]
-            if len(suffix) != 5 or not suffix.isascii() or not suffix.isdecimal():
-                raise HTTPException(502, "Invalid destination port")
-            port = int(suffix)
-            if port > 65535 or port in seen or values["m:attack_flows"] > values["m:total_flows"]:
-                raise HTTPException(502, "Invalid destination port statistics")
-            seen.add(port)
-            items.append(PortStatistic(destination_port=port, total_flows=values["m:total_flows"],
-                                       attack_flows=values["m:attack_flows"]))
-        if (sum(item.total_flows for item in items) != daily.total_flows
-                or sum(item.attack_flows for item in items) != daily.attack_flows):
-            raise HTTPException(502, "Port aggregates do not match the daily summary")
-        items.sort(key=lambda item: (-item.total_flows, item.destination_port))
-        return PortStatistics(day=day, total_ports=len(items), total_flows=daily.total_flows,
-                              attack_flows=daily.attack_flows, ports=items[:limit])
-
+        daily, payload = await read_daily(request, day)
+        try:
+            cells = [cell for cell in payload["Row"][0]["Cell"]
+                     if decode_text(cell["column"]) == "m:port_stats"]
+            if not cells:
+                raise HTTPException(503, "Port statistics are not imported; run the pipeline")
+            if len(cells) != 1:
+                raise ValueError("Duplicate port snapshot")
+            data = json.loads(decode_text(cells[0]["$"]))
+            result = PortStatistics(day=day, **data)
+            if (result.total_flows != daily.total_flows or result.attack_flows != daily.attack_flows
+                    or len(result.ports) != min(50, result.total_ports)
+                    or len({item.destination_port for item in result.ports}) != len(result.ports)
+                    or any(item.attack_flows > item.total_flows for item in result.ports)):
+                raise ValueError("Inconsistent port snapshot")
+            top_total = sum(item.total_flows for item in result.ports)
+            top_attacks = sum(item.attack_flows for item in result.ports)
+            if top_total > daily.total_flows or top_attacks > daily.attack_flows:
+                raise ValueError("Invalid port totals")
+            if result.total_ports <= 50 and (top_total != daily.total_flows or top_attacks != daily.attack_flows):
+                raise ValueError("Incomplete port snapshot")
+            result.ports.sort(key=lambda item: (-item.total_flows, item.destination_port))
+            result.ports = result.ports[:limit]
+            return result
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            raise HTTPException(502, "Invalid HBase port statistics") from exc
 
     return api
 

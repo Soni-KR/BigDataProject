@@ -1,0 +1,12 @@
+services:
+  dashboard:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:${CYBERFLOW_DASHBOARD_PORT:-3000}:8080"
+    networks:
+      - hadoop
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped

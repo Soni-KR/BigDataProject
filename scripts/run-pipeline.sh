@@ -23,7 +23,11 @@ if [[ "${2:-}" != "--import-only" ]]; then
   fi
   log=$(mktemp /tmp/cyberflow-spark.XXXXXX)
   trap 'rm -f "$log"' EXIT
-  spark-shell --master 'local[2]' --driver-memory 1g -i spark/processing.scala </dev/null 2>&1 | tee "$log"
+  export HADOOP_CONF_DIR="${HADOOP_CONF_DIR:-/usr/local/hadoop/etc/hadoop}"
+  spark-shell --master yarn --deploy-mode client --name CyberFlow \
+    --driver-memory 1g --num-executors 2 --executor-memory 1g --executor-cores 1 \
+    --conf spark.driver.host=hadoop-master --conf spark.driver.bindAddress=0.0.0.0 \
+    -i spark/processing.scala </dev/null 2>&1 | tee "$log"
   grep -q '^CYBERFLOW_PROCESSING_COMPLETE$' "$log" || { echo "Spark processing did not complete." >&2; exit 1; }
 fi
 bash scripts/import-hbase.sh

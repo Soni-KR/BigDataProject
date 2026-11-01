@@ -232,3 +232,35 @@ def test_hbase_empty_scan_object_is_valid_for_a_benign_day():
         response = client.get("/api/attacks?day=2017-07-07")
     assert response.status_code == 200
     assert response.json()["categories"] == []
+
+@pytest.mark.parametrize("endpoint", ["attacks", "ports"])
+@pytest.mark.parametrize("fault,expected", [
+    ("timeout", 504), ("connection", 503), ("http", 502),
+    ("json", 502), ("base64", 502), ("wrong_prefix", 502),
+])
+def test_statistics_upstream_failures_after_valid_summary(endpoint, fault, expected):
+    def handler(request):
+        if request.url.path.startswith("/cyber_daily/"):
+            return httpx.Response(200, json=SMALL_DAY)
+        assert request.method == "GET"
+        assert request.url.fragment == ""
+        assert b"%23*" in request.url.raw_path
+        assert request.url.params["endrow"] == "2017-07-07$"
+        assert request.url.params["v"] == "1"
+        assert request.headers["Accept"] == "application/json"
+        if fault == "timeout":
+            raise httpx.ReadTimeout("aggregate timeout", request=request)
+        if fault == "connection":
+            raise httpx.ConnectError("aggregate unavailable", request=request)
+        if fault == "http":
+            return httpx.Response(500)
+        if fault == "json":
+            return httpx.Response(200, text="not json")
+        prefix = "2017-07-08#" if fault == "wrong_prefix" else "2017-07-07#"
+        row = (aggregate_row(prefix + "SSH", flow_count=4) if endpoint == "attacks"
+               else aggregate_row(prefix + "00080", total_flows=10, attack_flows=4))
+        if fault == "base64":
+            row["Cell"][0]["$"] = "%%%"
+        return httpx.Response(200, json={"Row": [row]})
+    with client_for(handler) as client:
+        assert client.get("/api/" + endpoint + "?day=2017-07-07").status_code == expected

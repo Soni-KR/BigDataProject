@@ -3,6 +3,7 @@ import org.apache.spark.sql.functions._
 
 try {
   val runPath = sys.env("CYBERFLOW_RUN_PATH")
+  val cleanPath = s"hdfs://$runPath/clean"
   spark.conf.set("spark.sql.shuffle.partitions", "8")
   val raw = spark.read.option("header", "true").csv("hdfs:///cyberflow/raw/*.csv")
   val named = raw.toDF(raw.columns.map(_.trim): _*).withColumn("source_file", input_file_name())
@@ -23,9 +24,11 @@ try {
   val cleaned = withDay.toDF(names: _*)
   require(cleaned.filter(col("day").isNull || col("label").isNull || length(col("label")) === 0).count() == 0, "Missing day or label")
   require(cleaned.filter(col("label").rlike("[|\\r\\n]")).count() == 0, "Unsupported label separator")
-  cleaned.write.partitionBy("day").parquet(s"hdfs://$runPath/clean")
+  cleaned.write.partitionBy("day").parquet(cleanPath)
 
-  val saved = spark.read.parquet("hdfs:///cyberflow/clean/flows").select("day", "label", "destination_port").cache()
+  val currentRun = spark.read.parquet(cleanPath)
+  require(currentRun.inputFiles.nonEmpty && currentRun.inputFiles.forall(_.contains(runPath + "/clean/")), "Cleaned input is outside the current run")
+  val saved = currentRun.select("day", "label", "destination_port").cache()
   val total = saved.count()
   require(total > 0 && total == raw.count(), "Processing changed the row count")
   require(saved.filter(col("destination_port").isNull || col("destination_port") < 0 || col("destination_port") > 65535).count() == 0, "Invalid destination port")

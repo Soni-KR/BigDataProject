@@ -20,8 +20,9 @@ docker exec hadoop-master bash /tmp/ingest_hdfs.sh
 .\start-dashboard.ps1
 ```
 
-The pipeline starts HBase REST on port 8090 if needed, processes every raw CSV,
-writes a new HDFS run under `/cyberflow/runs/`, and upserts the three derived
+The pipeline starts HBase REST on port 8090 if needed and processes every raw CSV
+on YARN using Spark 2.2 client mode. It writes a new HDFS run under
+`/cyberflow/runs/` and upserts the three derived
 HBase tables. Existing HDFS outputs and raw data are preserved. Imports do not
 delete obsolete rows; use the verification command below after changing inputs.
 

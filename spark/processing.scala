@@ -1,23 +1,66 @@
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
-val raw = spark.read.option("header","true").csv("hdfs:///cyberflow/raw/*.csv")
-val named = raw.toDF(raw.columns.map(_.trim): _*).withColumn("source_file",input_file_name())
-val base = named.withColumn("Label",trim(col("Label")))
-val excluded = Set("Label","source_file")
-val typed = base.columns.filterNot(excluded).foldLeft(base)((df,c) => { val dataType = if(c == "Destination Port") "int" else if(c == "Flow Duration") "long" else "double"; val value = trim(col(s"`$c`")); df.withColumn(c,when(lower(value).isin("infinity","-infinity","nan",""),lit(null)).otherwise(value).cast(dataType)) })
-val file = col("source_file")
-val withDay = typed.withColumn("day",when(file.contains("Monday"),"2017-07-03").when(file.contains("Tuesday"),"2017-07-04").when(file.contains("Wednesday"),"2017-07-05").when(file.contains("Thursday"),"2017-07-06").when(file.contains("Friday"),"2017-07-07"))
-val names = withDay.columns.map(_.trim.toLowerCase.replaceAll("[^a-z0-9]+","_").stripPrefix("_").stripSuffix("_"))
-require(names.distinct.length == names.length,"Duplicate columns")
-val cleaned = withDay.toDF(names: _*)
-require(cleaned.filter(col("day").isNull).count() == 0,"Missing capture days")
-cleaned.write.mode("overwrite").partitionBy("day").parquet("hdfs:///cyberflow/clean/flows")
-val saved = spark.read.parquet("hdfs:///cyberflow/clean/flows")
-val daily = saved.groupBy("day").agg(count("*").as("total_flows"),sum(when(col("label") === "BENIGN",1).otherwise(0)).as("benign_flows"),sum(when(col("label") =!= "BENIGN",1).otherwise(0)).as("attack_flows"))
-val attacks = saved.filter(col("label") =!= "BENIGN").groupBy("day","label").count().withColumnRenamed("label","attack_type").withColumnRenamed("count","flow_count")
-val ports = saved.groupBy("day","destination_port").agg(count("*").as("total_flows"),sum(when(col("label") =!= "BENIGN",1).otherwise(0)).as("attack_flows"))
-daily.write.mode("overwrite").parquet("hdfs:///cyberflow/aggregates/daily")
-attacks.write.mode("overwrite").parquet("hdfs:///cyberflow/aggregates/attacks")
-ports.write.mode("overwrite").parquet("hdfs:///cyberflow/aggregates/ports")
-println("Processing complete!")
-println("Total flows: " + saved.count())
-daily.orderBy("day").show(false)
+
+try {
+  val runPath = sys.env("CYBERFLOW_RUN_PATH")
+  spark.conf.set("spark.sql.shuffle.partitions", "8")
+  val raw = spark.read.option("header", "true").csv("hdfs:///cyberflow/raw/*.csv")
+  val named = raw.toDF(raw.columns.map(_.trim): _*).withColumn("source_file", input_file_name())
+  val base = named.withColumn("Label", trim(col("Label")))
+  val excluded = Set("Label", "source_file")
+  val typed = base.columns.filterNot(excluded).foldLeft(base) { (df, name) =>
+    val dataType = if (name == "Destination Port") "int" else if (name == "Flow Duration") "long" else "double"
+    val value = trim(col(s"`$name`"))
+    df.withColumn(name, when(lower(value).isin("infinity", "-infinity", "nan", ""), lit(null)).otherwise(value).cast(dataType))
+  }
+  val file = col("source_file")
+  val withDay = typed.withColumn("day",
+    when(file.contains("Monday"), "2017-07-03").when(file.contains("Tuesday"), "2017-07-04")
+      .when(file.contains("Wednesday"), "2017-07-05").when(file.contains("Thursday"), "2017-07-06")
+      .when(file.contains("Friday"), "2017-07-07"))
+  val names = withDay.columns.map(_.trim.toLowerCase.replaceAll("[^a-z0-9]+", "_").stripPrefix("_").stripSuffix("_"))
+  require(names.distinct.length == names.length, "Duplicate columns")
+  val cleaned = withDay.toDF(names: _*)
+  require(cleaned.filter(col("day").isNull || col("label").isNull || length(col("label")) === 0).count() == 0, "Missing day or label")
+  require(cleaned.filter(col("label").rlike("[|\\r\\n]")).count() == 0, "Unsupported label separator")
+  cleaned.write.partitionBy("day").parquet(s"hdfs://$runPath/clean")
+
+  val saved = spark.read.parquet("hdfs:///cyberflow/clean/flows").select("day", "label", "destination_port").cache()
+  val total = saved.count()
+  require(total > 0 && total == raw.count(), "Processing changed the row count")
+  require(saved.filter(col("destination_port").isNull || col("destination_port") < 0 || col("destination_port") > 65535).count() == 0, "Invalid destination port")
+  val daily = saved.groupBy("day").agg(
+    count("*").as("total_flows"),
+    sum(when(col("label") === "BENIGN", 1).otherwise(0)).as("benign_flows"),
+    sum(when(col("label") =!= "BENIGN", 1).otherwise(0)).as("attack_flows")).cache()
+  val attacks = saved.filter(col("label") =!= "BENIGN").groupBy("day", "label")
+    .count().withColumnRenamed("label", "attack_type").withColumnRenamed("count", "flow_count").cache()
+  val ports = saved.groupBy("day", "destination_port").agg(
+    count("*").as("total_flows"),
+    sum(when(col("label") =!= "BENIGN", 1).otherwise(0)).as("attack_flows")).cache()
+
+  def export(df: DataFrame, name: String): Unit = {
+    df.coalesce(1).write.parquet(s"hdfs://$runPath/aggregates/$name")
+  }
+  def tsv(df: DataFrame, name: String): Unit = {
+    df.coalesce(1).write.option("sep", "|").option("header", "false")
+      .csv(s"hdfs://$runPath/exports/$name")
+  }
+  export(daily, "daily")
+  export(attacks, "attacks")
+  export(ports, "ports")
+  tsv(daily.select(col("day"), col("total_flows"), col("benign_flows"), col("attack_flows")), "daily")
+  tsv(attacks.select(concat(col("day"), lit("#"), col("attack_type")).as("key"), col("flow_count")), "attacks")
+  tsv(ports.select(concat(col("day"), lit("#"), format_string("%05d", col("destination_port"))).as("key"),
+    col("total_flows"), col("attack_flows")), "ports")
+  val manifest = daily
+    .join(attacks.groupBy("day").agg(count("*").as("attack_categories")), Seq("day"), "left")
+    .join(ports.groupBy("day").agg(count("*").as("destination_ports")), Seq("day"), "left").na.fill(0)
+  manifest.coalesce(1).write.json(s"hdfs://$runPath/exports/manifest")
+  daily.orderBy("day").show(false)
+  println("Processed flows: " + total)
+  println("CYBERFLOW_PROCESSING_COMPLETE")
+  System.exit(0)
+} catch {
+  case error: Throwable => error.printStackTrace(); System.exit(1)
+}

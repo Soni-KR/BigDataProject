@@ -110,3 +110,125 @@ def test_corrupt_cells_are_not_silently_zeroed(fault):
 def test_invalid_json():
     with client_for(lambda request: httpx.Response(200, text="not json")) as client:
         assert client.get("/api/summary?day=2017-07-07").status_code == 502
+
+def encoded(value):
+    return base64.b64encode(str(value).encode()).decode()
+
+
+def aggregate_row(key, **metrics):
+    return {"key": encoded(key), "Cell": [
+        {"column": encoded("m:" + name), "$": encoded(value)}
+        for name, value in metrics.items()
+    ]}
+
+
+SMALL_DAY = {"Row": [aggregate_row("2017-07-07", total_flows=10, benign_flows=6, attack_flows=4)]}
+
+
+def statistics_client(rows, table="cyber_attacks", summary=SMALL_DAY, status=200, schema=200):
+    def handler(request):
+        if request.url.path.startswith("/cyber_daily/"):
+            return httpx.Response(200, json=summary)
+        if request.url.path == "/" + table + "/schema":
+            return httpx.Response(schema, json={})
+        assert request.method == "GET"
+        assert request.url.params["endrow"] == "2017-07-07$"
+        assert request.url.raw_path.startswith(("/" + table + "/2017-07-07%23*").encode())
+        return httpx.Response(status, json={"Row": rows})
+    return client_for(handler)
+
+
+def test_attack_categories_are_decoded_and_sorted():
+    rows = [aggregate_row("2017-07-07#FTP", flow_count=1), aggregate_row("2017-07-07#SSH", flow_count=3)]
+    with statistics_client(rows) as client:
+        response = client.get("/api/attacks?day=2017-07-07")
+    assert response.status_code == 200
+    assert response.json() == {
+        "day": "2017-07-07", "attack_flows": 4,
+        "categories": [{"attack_type": "SSH", "flow_count": 3}, {"attack_type": "FTP", "flow_count": 1}],
+    }
+
+
+def test_benign_day_has_no_attack_categories():
+    daily = {"Row": [aggregate_row("2017-07-07", total_flows=10, benign_flows=10, attack_flows=0)]}
+    with statistics_client([], summary=daily, status=404) as client:
+        response = client.get("/api/attacks?day=2017-07-07")
+    assert response.status_code == 200
+    assert response.json()["categories"] == []
+
+
+def test_missing_aggregate_table_is_not_reported_as_zero_attacks():
+    with statistics_client([], status=404, schema=404) as client:
+        assert client.get("/api/attacks?day=2017-07-07").status_code == 502
+
+
+def test_port_limit_applies_after_totals_are_verified():
+    rows = [aggregate_row("2017-07-07#00443", total_flows=4, attack_flows=3),
+            aggregate_row("2017-07-07#00080", total_flows=6, attack_flows=1)]
+    with statistics_client(rows, table="cyber_ports") as client:
+        response = client.get("/api/ports?day=2017-07-07&limit=1")
+    assert response.status_code == 200
+    assert response.json() == {
+        "day": "2017-07-07", "total_ports": 2, "total_flows": 10, "attack_flows": 4,
+        "ports": [{"destination_port": 80, "total_flows": 6, "attack_flows": 1}],
+    }
+
+
+@pytest.mark.parametrize("endpoint", ["attacks", "ports"])
+@pytest.mark.parametrize("query", ["", "?day=bad", "?day=2017-02-30", "?day=20170707"])
+def test_statistics_dates_are_validated(endpoint, query):
+    def handler(request):
+        pytest.fail("Invalid date reached HBase")
+    with client_for(handler) as client:
+        assert client.get("/api/" + endpoint + query).status_code == 422
+
+
+@pytest.mark.parametrize("limit", ["0", "51", "-1", "bad"])
+def test_port_limit_is_bounded(limit):
+    with client_for(lambda request: pytest.fail("Invalid limit reached HBase")) as client:
+        assert client.get("/api/ports?day=2017-07-07&limit=" + limit).status_code == 422
+
+
+@pytest.mark.parametrize("rows", [
+    [], [aggregate_row("2017-07-07#SSH", flow_count=3)],
+    [aggregate_row("2017-07-06#SSH", flow_count=4)],
+    [aggregate_row("2017-07-07#SSH", flow_count=-4)],
+    [aggregate_row("2017-07-07#SSH", total_flows=4)],
+    [aggregate_row("2017-07-07#SSH", flow_count=2)] * 2,
+])
+def test_incomplete_or_corrupt_attack_statistics_fail(rows):
+    with statistics_client(rows) as client:
+        assert client.get("/api/attacks?day=2017-07-07").status_code == 502
+
+
+@pytest.mark.parametrize("rows", [
+    [], [aggregate_row("2017-07-07#65536", total_flows=10, attack_flows=4)],
+    [aggregate_row("2017-07-07#abcde", total_flows=10, attack_flows=4)],
+    [aggregate_row("2017-07-07#00080", total_flows=10, attack_flows=11)],
+    [aggregate_row("2017-07-07#00080", total_flows=9, attack_flows=4)],
+])
+def test_invalid_or_incomplete_port_statistics_fail(rows):
+    with statistics_client(rows, table="cyber_ports") as client:
+        assert client.get("/api/ports?day=2017-07-07").status_code == 502
+
+
+@pytest.mark.parametrize("endpoint", ["attacks", "ports"])
+def test_statistics_missing_day_and_network_errors(endpoint):
+    with client_for(lambda request: httpx.Response(404)) as client:
+        assert client.get("/api/" + endpoint + "?day=2017-07-07").status_code == 404
+    def handler(request):
+        raise httpx.ConnectError("offline", request=request)
+    with client_for(handler) as client:
+        assert client.get("/api/" + endpoint + "?day=2017-07-07").status_code == 503
+
+def test_hbase_empty_scan_object_is_valid_for_a_benign_day():
+    daily = {"Row": [aggregate_row("2017-07-07", total_flows=10, benign_flows=10, attack_flows=0)]}
+    def handler(request):
+        if request.url.path.startswith("/cyber_daily/"):
+            return httpx.Response(200, json=daily)
+        assert request.url.params["endrow"] == "2017-07-07$"
+        return httpx.Response(200, json={})
+    with client_for(handler) as client:
+        response = client.get("/api/attacks?day=2017-07-07")
+    assert response.status_code == 200
+    assert response.json()["categories"] == []

@@ -10,6 +10,7 @@ import {
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { attackRate, CAPTURE_DAYS, loadDashboard, summariesCsv } from './api.js';
+import StatisticsPanels from './StatisticsPanels.jsx';
 
 const integer = new Intl.NumberFormat('en-US');
 const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
@@ -48,7 +49,7 @@ function useDashboard() {
     }).finally(() => clearTimeout(timer));
     return () => { disposed = true; clearTimeout(timer); controller.abort(); };
   }, [revision]);
-  return { ...state, refresh: () => setRevision(value => value + 1) };
+  return { ...state, revision, refresh: () => setRevision(value => value + 1) };
 }
 
 function Connection({ health, loading, compact: isCompact = false }) {
@@ -197,7 +198,7 @@ function Pipeline({ health, loading }) {
 }
 
 export default function App() {
-  const { phase, records, health, refresh } = useDashboard();
+  const { phase, records, health, revision, refresh } = useDashboard();
   const [selectedDay, setSelectedDay] = useState('2017-07-07');
   const [activeSection, setActiveSection] = useState('overview');
   const [menuOpen, setMenuOpen] = useState(false);
@@ -268,6 +269,7 @@ export default function App() {
             <MetricCard title="Attack rate" value={summary && percent(rate)} detail="Attack flows / total flows" icon={Gauge} tone="rate-card" loading={loading} />
           </div>
           <div className="charts-grid"><TrafficChart records={records} loading={loading} /><Composition summary={summary} capture={capture} loading={loading} /></div>
+          <StatisticsPanels key={selectedDay + ":" + revision} day={capture} />
         </section>
         <CaptureTable records={records} selectedDay={selectedDay} selectDay={setSelectedDay} loading={loading} />
         <Pipeline health={health} loading={loading} />

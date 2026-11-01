@@ -54,12 +54,62 @@ def decode_summary(payload: dict, day: str) -> Summary:
     return Summary(day=day, **values)
 
 
+
+class AttackCategory(BaseModel):
+    attack_type: str = Field(min_length=1)
+    flow_count: int = Field(ge=0)
+
+
+class AttackStatistics(BaseModel):
+    day: date
+    attack_flows: int = Field(ge=0)
+    categories: list[AttackCategory]
+
+
+class PortStatistic(BaseModel):
+    destination_port: int = Field(ge=0, le=65535)
+    total_flows: int = Field(ge=0)
+    attack_flows: int = Field(ge=0)
+
+
+class PortStatistics(BaseModel):
+    day: date
+    total_ports: int = Field(ge=0)
+    total_flows: int = Field(ge=0)
+    attack_flows: int = Field(ge=0)
+    ports: list[PortStatistic]
+
+
+def decode_statistics(payload: dict, day: str, metrics: set[str]) -> dict:
+    rows = payload.get("Row", [])
+    if not isinstance(rows, list) or len(rows) > 65536:
+        raise ValueError("Invalid aggregate rows")
+    result = {}
+    for row in rows:
+        key = decode_text(row["key"])
+        if not key.startswith(day + "#") or not key[len(day) + 1:] or key in result:
+            raise ValueError("Unexpected or duplicate aggregate key")
+        values = {}
+        for cell in row["Cell"]:
+            column = decode_text(cell["column"])
+            if column not in metrics:
+                continue
+            raw = decode_text(cell["$"])
+            if column in values or not raw.isascii() or not raw.isdecimal():
+                raise ValueError("Invalid aggregate metric")
+            values[column] = int(raw)
+        if set(values) != metrics:
+            raise ValueError("Missing aggregate metric")
+        result[key] = values
+    return result
+
+
 def create_app(*, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(
             base_url=os.getenv("HBASE_REST_URL", "http://hadoop-master:8090").rstrip("/"),
-            timeout=5.0,
+            timeout=15.0,
             headers={"Accept": "application/json"},
             trust_env=False,
             transport=transport,
@@ -69,7 +119,7 @@ def create_app(*, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
 
     api = FastAPI(title="CyberFlow API", version="0.1.0", lifespan=lifespan)
 
-    async def read_hbase(request: Request, path: str, *, params=None):
+    async def read_hbase(request: Request, path: str, *, params=None, allow_missing=False):
         try:
             response = await request.app.state.hbase.get(path, params=params)
             response.raise_for_status()
@@ -78,6 +128,8 @@ def create_app(*, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(504, "HBase REST request timed out") from exc
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
+                if allow_missing:
+                    return None
                 raise HTTPException(404, "Summary not found") from exc
             raise HTTPException(502, "HBase REST returned an error") from exc
         except httpx.RequestError as exc:
@@ -113,6 +165,64 @@ def create_app(*, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(404, "Summary not found") from exc
         except (ValueError, TypeError, KeyError, IndexError, AttributeError, binascii.Error) as exc:
             raise HTTPException(502, "Invalid HBase summary data") from exc
+
+
+    async def statistics(request: Request, table: str, day: str, metrics: set[str]):
+        response = await read_hbase(request, f"/{table}/{day}%23*", params={"v": 1, "endrow": day + "$"}, allow_missing=True)
+        if response is None:
+            # An empty prefix is valid; a missing table is an upstream failure.
+            try:
+                await read_hbase(request, f"/{table}/schema")
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    raise HTTPException(502, "HBase aggregate table is missing") from exc
+                raise
+            return {}
+        try:
+            return decode_statistics(response.json(), day, metrics)
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            raise HTTPException(502, "Invalid HBase aggregate data") from exc
+
+    @api.get("/api/attacks", response_model=AttackStatistics)
+    async def attacks(request: Request, day: Annotated[str, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")]):
+        daily = await summary(request, day)
+        rows = await statistics(request, "cyber_attacks", day, {"m:flow_count"})
+        categories = [
+            AttackCategory(attack_type=key[len(day) + 1:], flow_count=values["m:flow_count"])
+            for key, values in rows.items()
+        ]
+        categories.sort(key=lambda item: (-item.flow_count, item.attack_type))
+        if sum(item.flow_count for item in categories) != daily.attack_flows:
+            raise HTTPException(502, "Attack aggregates do not match the daily summary")
+        return AttackStatistics(day=day, attack_flows=daily.attack_flows, categories=categories)
+
+    @api.get("/api/ports", response_model=PortStatistics)
+    async def ports(
+        request: Request,
+        day: Annotated[str, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")],
+        limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    ):
+        daily = await summary(request, day)
+        rows = await statistics(request, "cyber_ports", day, {"m:total_flows", "m:attack_flows"})
+        items = []
+        seen = set()
+        for key, values in rows.items():
+            suffix = key[len(day) + 1:]
+            if len(suffix) != 5 or not suffix.isascii() or not suffix.isdecimal():
+                raise HTTPException(502, "Invalid destination port")
+            port = int(suffix)
+            if port > 65535 or port in seen or values["m:attack_flows"] > values["m:total_flows"]:
+                raise HTTPException(502, "Invalid destination port statistics")
+            seen.add(port)
+            items.append(PortStatistic(destination_port=port, total_flows=values["m:total_flows"],
+                                       attack_flows=values["m:attack_flows"]))
+        if (sum(item.total_flows for item in items) != daily.total_flows
+                or sum(item.attack_flows for item in items) != daily.attack_flows):
+            raise HTTPException(502, "Port aggregates do not match the daily summary")
+        items.sort(key=lambda item: (-item.total_flows, item.destination_port))
+        return PortStatistics(day=day, total_ports=len(items), total_flows=daily.total_flows,
+                              attack_flows=daily.attack_flows, ports=items[:limit])
+
 
     return api
 

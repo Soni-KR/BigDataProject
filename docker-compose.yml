@@ -8,8 +8,17 @@ services:
       HBASE_REST_URL: http://hadoop-master:8090
     ports:
       - "127.0.0.1:${CYBERFLOW_PORT:-8000}:8000"
-    networks:
-      - hadoop
+    networks: [hadoop]
+    restart: unless-stopped
+
+  dashboard:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:${CYBERFLOW_DASHBOARD_PORT:-3000}:8080"
+    networks: [hadoop]
+    depends_on:
+      api:
+        condition: service_started
     restart: unless-stopped
 
 networks:

@@ -67,7 +67,6 @@ export async function loadDashboard({ signal, fetcher = globalThis.fetch } = {})
       hbase: health[1].status === 'fulfilled' && health[1].value?.status === 'ok'
         && health[1].value?.hbase === 'reachable',
     },
-    loadedAt: new Date(),
   };
 }
 
@@ -76,4 +75,44 @@ export function summariesCsv(records) {
   return [header, ...records.filter(row => row.status === 'ready').map(({ data }) =>
     [data.day, data.total_flows, data.benign_flows, data.attack_flows, attackRate(data).toFixed(2)].join(',')),
   ].join('\r\n') + '\r\n';
+}
+
+export function validateAttacks(value, day) {
+  if (!value || value.day !== day || !Array.isArray(value.categories) ||
+      !Number.isSafeInteger(value.attack_flows) || value.attack_flows < 0 ||
+      !value.categories.every(row => typeof row.attack_type === 'string' && row.attack_type.length > 0 &&
+        Number.isSafeInteger(row.flow_count) && row.flow_count >= 0) ||
+      new Set(value.categories.map(row => row.attack_type)).size !== value.categories.length ||
+      value.categories.reduce((sum, row) => sum + row.flow_count, 0) !== value.attack_flows) {
+    throw new ApiError('The API returned inconsistent attack categories.');
+  }
+  return value;
+}
+
+export function validatePorts(value, day) {
+  if (!value || value.day !== day || !Array.isArray(value.ports) ||
+      !['total_ports', 'total_flows', 'attack_flows'].every(key => Number.isSafeInteger(value[key]) && value[key] >= 0) ||
+      value.attack_flows > value.total_flows || value.ports.length > value.total_ports ||
+      !value.ports.every(row => Number.isInteger(row.destination_port) && row.destination_port >= 0 &&
+        row.destination_port <= 65535 && Number.isSafeInteger(row.total_flows) && row.total_flows >= 0 &&
+        Number.isSafeInteger(row.attack_flows) && row.attack_flows >= 0 && row.attack_flows <= row.total_flows) ||
+      new Set(value.ports.map(row => row.destination_port)).size !== value.ports.length ||
+      value.ports.reduce((sum, row) => sum + row.total_flows, 0) > value.total_flows ||
+      value.ports.reduce((sum, row) => sum + row.attack_flows, 0) > value.attack_flows) {
+    throw new ApiError('The API returned inconsistent port statistics.');
+  }
+  return value;
+}
+
+export async function loadStatistics(day, { signal, fetcher = globalThis.fetch } = {}) {
+  const options = { signal, fetcher };
+  const [attacks, ports] = await Promise.allSettled([
+    request('/api/attacks?day=' + day, options).then(value => validateAttacks(value, day)),
+    request('/api/ports?day=' + day + '&limit=10', options).then(value => validatePorts(value, day)),
+  ]);
+  if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
+  const result = response => response.status === 'fulfilled'
+    ? { status: 'ready', data: response.value }
+    : { status: 'error', message: response.reason.message };
+  return { attacks: result(attacks), ports: result(ports) };
 }

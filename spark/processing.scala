@@ -47,7 +47,6 @@ try {
   manifest.coalesce(1).write.json(s"hdfs://$runPath/exports/manifest")
   daily.orderBy("day").show(false)
   println("Processed flows: " + total)
-  println("CYBERFLOW_PROCESSING_COMPLETE")
   System.exit(0)
 } catch {
   case error: Throwable => error.printStackTrace(); System.exit(1)

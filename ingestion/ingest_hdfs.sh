@@ -1,11 +1,8 @@
 #!/bin/bash
 set -e
-
 hdfs dfs -mkdir -p /cyberflow/raw
-
 for file in /data/cicids/*.csv; do
     name=$(basename "$file")
-
     if hdfs dfs -test -e "/cyberflow/raw/$name"; then
         echo "Already exists: $name"
     else
@@ -13,6 +10,5 @@ for file in /data/cicids/*.csv; do
         echo "Uploaded: $name"
     fi
 done
-
 hdfs dfs -ls -h /cyberflow/raw/
 hdfs fsck /cyberflow/raw/ -files -blocks

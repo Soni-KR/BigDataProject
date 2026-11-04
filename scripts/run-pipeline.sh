@@ -11,6 +11,7 @@ if [[ "${2:-}" != "--import-only" ]]; then
     exit 1
   fi
   export HADOOP_CONF_DIR="${HADOOP_CONF_DIR:-/usr/local/hadoop/etc/hadoop}"
+  #exécuter Spark : --master yarn : YARN gère les ressources ; --deploy-mode client : le driver reste dans le conteneur où la commande est lancée ; les executors sont lancés par YARN.
   spark-shell --master yarn --deploy-mode client --name CyberFlow --driver-memory 1g --num-executors 2 --executor-memory 1g --executor-cores 1 --conf spark.driver.host=hadoop-master --conf spark.driver.bindAddress=0.0.0.0 -i spark/processing.scala </dev/null
 fi
 # Import checks every export's _SUCCESS, including the manifest written last.

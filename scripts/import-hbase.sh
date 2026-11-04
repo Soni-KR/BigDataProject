@@ -1,3 +1,5 @@
+#importer dans HBase les statistiques déjà calculées par Spark
+
 #!/usr/bin/env bash
 set -euo pipefail
 : "${CYBERFLOW_RUN_PATH:?Set CYBERFLOW_RUN_PATH to the completed Spark run}"

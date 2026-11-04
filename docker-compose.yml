@@ -14,18 +14,36 @@ services:
       - "127.0.0.1:${CYBERFLOW_PORT:-8000}:8000"
     networks: [hadoop]
     restart: unless-stopped
-
+#Le dashboard est construit à partir du dossier frontend
+#Le navigateur accède donc à http://localhost:3000
   dashboard:
     build: ./frontend
     ports:
       - "127.0.0.1:${CYBERFLOW_DASHBOARD_PORT:-3000}:8080"
-    networks: [hadoop]
-    depends_on:
-      api:
-        condition: service_started
-    restart: unless-stopped
+  #Les conteneurs utilisent le réseau Hadoop existant
+  # le conteneur API peut joindre hadoop-master:8090
+  
+# Connecte le service au réseau Docker nommé "hadoop"
+networks: [hadoop]
 
+# Définit les dépendances entre les services
+depends_on:
+  # Le service "api" doit démarrer avant le service courant
+  api:
+    # Attend que le conteneur de l'API soit démarré
+    condition: service_started
+
+# Définit la politique de redémarrage automatique du conteneur
+# Docker redémarre le conteneur en cas d'arrêt ou d'erreur,
+# sauf si le conteneur a été volontairement arrêté
+restart: unless-stopped
+
+# Déclaration des réseaux utilisés par les services Docker
 networks:
+  # Réseau Docker nommé "hadoop"
   hadoop:
+    # Indique que le réseau existe déjà et qu'il a été créé en dehors de ce fichier Compose
     external: true
+
+    # Nom exact du réseau Docker à utiliser
     name: hadoop

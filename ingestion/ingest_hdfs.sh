@@ -1,3 +1,5 @@
+#copier les fichiers CSV du dataset CIC-IDS2017 dans HDFS
+
 #!/bin/bash
 set -e
 hdfs dfs -mkdir -p /cyberflow/raw

@@ -224,7 +224,8 @@ try {
     )
     .na.fill(0)
 
-  // Enregistrer le manifeste au format JSON dans HDFS
+  // Enregistrer le manifeste au format JSON dans HDFS 
+  // coalesce(1) produit un seul fichier de sortie par export
   manifest.coalesce(1).write.json(s"hdfs://$runPath/exports/manifest")
 
   // Afficher les statistiques quotidiennes dans la console

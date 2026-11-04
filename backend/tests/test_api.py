@@ -1,3 +1,5 @@
+#vérifie que l’API récupère correctement les statistiques depuis HBase et gère correctement les erreurs
+
 import base64
 import json
 from copy import deepcopy

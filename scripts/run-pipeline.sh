@@ -59,6 +59,7 @@ if [[ "${2:-}" != "--import-only" ]]; then
     --conf spark.driver.host=hadoop-master \
     --conf spark.driver.bindAddress=0.0.0.0 \
     -i spark/processing.scala </dev/null
+  #2 executors, 1 Go par executor, 1 CPU par executor, 1 Go pour le driver
 fi
 
 # Lance le script d'importation des résultats dans HBase

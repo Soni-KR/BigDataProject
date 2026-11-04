@@ -1,11 +1,15 @@
 name: cyberflow
 services:
+#construire l’image Docker du backend à partir du stage runtime du Dockerfile
   api:
     build:
       context: ./backend
       target: runtime
+#Cette variable indique à FastAPI où se trouve HBase REST
     environment:
       HBASE_REST_URL: http://hadoop-master:8090
+#Le port 8000 du conteneur est exposé localement sur le port 8000
+#Le préfixe 127.0.0.1 évite d’exposer directement l’API à toutes les interfaces réseau
     ports:
       - "127.0.0.1:${CYBERFLOW_PORT:-8000}:8000"
     networks: [hadoop]

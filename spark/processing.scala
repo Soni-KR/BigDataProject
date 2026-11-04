@@ -142,7 +142,8 @@ try {
       ).as("ports")
     )
 
-  // Créer un résumé global des statistiques des ports pour chaque jour
+  // Créer un résumé global des statistiques des ports pour chaque jour et le stocker
+  // Pour que l’API puisse lire directement les statistiques pré-calculées sans scanner toute la table détaillée des ports à chaque requête
   val portSnapshot = ports.groupBy("day").agg(
     count("*").as("total_ports"),
     sum("total_flows").as("total_flows"),

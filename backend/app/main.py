@@ -1,7 +1,7 @@
 """Read-only CyberFlow API backed by the existing HBase REST gateway."""
 
 import base64
-import json
+import json  #convertir du JSON en objets Python
 import os
 from contextlib import asynccontextmanager
 from datetime import date
@@ -9,7 +9,7 @@ from typing import Annotated
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field 
 
 
 class SummaryNotFound(Exception):
